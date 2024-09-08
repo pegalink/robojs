@@ -38,6 +38,7 @@ class Client extends EventEmitter {
   private heartbeatInterval: NodeJS.Timeout | null;
   private heartbeatTimeout: NodeJS.Timeout | null;
   private axiosInstance: AxiosInstance
+  private lastsequence: Number
 
   constructor(options: ClientOptions) {
     super();
@@ -72,11 +73,11 @@ class Client extends EventEmitter {
       throw new Error(`Error happened while fetching guild: ${call.status}, ${call.statusText}`)
     }
   }
-  async createMessage(channelid: string, message: CreateMessageOptions) {
+  async createMessage(channelid: string, message: string) {
     const params = {
-      content: message.content
+      content: message
     }
-    const call = await this.axiosInstance.post(`https://discord.com/api/v9/channels/${channelid}/messages`, JSON.stringify(params));
+    const call = await this.axiosInstance.post(`https://discord.com/api/v9/channels/${channelid}/messages`, params);
     if (call.status === 200) {
       return call.data;
     } else {
@@ -96,11 +97,12 @@ class Client extends EventEmitter {
       });
       this.axiosInstance = axiosstance;
       this.ws = new WebSocketLib(wsUrl);
+      const identifyIntents = this.intents.reduce((acc, current) => acc + current, 0);
       const payload = {
         op: 2,
         d: {
           token: `Bot ${this.token}`,
-          intents: 33280,
+          intents: 33281,
           properties: {
             os: 'windows',
             browser: 'robo.js',
@@ -115,13 +117,18 @@ class Client extends EventEmitter {
   
       this.ws.on('message', async (message) => {
         const data = JSON.parse(message);
-        const { d, event, op, t } = data;
+        const { d, event, op, t, s } = data;
         switch (op) {
           case 10: // Hello
             console.log(`Hello discord! Thanks, I now know that my heartbeat interval is ${data.d.heartbeat_interval}`)
             this.heartbeat(35000)
             break;
           case 0: // Dispatch
+          if (s === null) {
+
+          } else {
+            this.lastsequence = s;
+          }
             if (data.t === 'READY') {
               const userData = data.d;
               this.emit(DiscordEvents.Ready, userData.user);
@@ -153,16 +160,6 @@ class Client extends EventEmitter {
     } catch (error) {
       console.error('Error connecting to WebSocket:', error);
     }
-  }
-
-  async destroy() {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-    }
-    if (this.heartbeatTimeout) {
-      clearTimeout(this.heartbeatTimeout);
-    }
-    this.ws.close();
   }
 }
 
