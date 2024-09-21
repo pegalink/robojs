@@ -1,4 +1,5 @@
-# robojs
-Robo.js is a library to interact with discord
+# robo.js
+Robo.js is a wrapper for the Discord API, built in TypeScript.
 
-**THIS DOESN'T HAVE FULL API COVERAGE**
+> [!WARNING]
+> **THIS DOESN'T HAVE FULL API COVERAGE**
