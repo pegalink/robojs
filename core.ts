@@ -1,7 +1,8 @@
-import axios, { AxiosInstance } from 'axios';
+const axios = require('axios');
+const { AxiosInstance } = require('axios');
 const WebSocketLib = require('ws');
 const EventEmitter = require('events');
-let axiosInstanceAll: AxiosInstance;
+let axiosInstanceAll: typeof axios.AxiosInstance;
 enum DiscordIntents {
   Guilds = 1 << 0,
   GuildMembers = 1 << 1,
@@ -34,7 +35,6 @@ interface ClientOptions {
 enum DiscordEvents {
   Ready = 'READY',
   MessageCreate = 'MESSAGE_CREATE'
-  // Add more events as needed
 }
 /*
 enum ChannelType {
@@ -156,21 +156,31 @@ class Client extends EventEmitter {
   private token: string;
   private intents: number[];
   private ws: any;
-  public axiosInstance: AxiosInstance
+  public axiosInstance: typeof AxiosInstance
   private lastsequence: Number
-  private websocketUrlForReconnect: string
+  private websocketUrlForReconnect: string = 'wss://gateway.discord.gg'
   private sessionId: any
   private acknowledgedHeartbeat: boolean
+  private heartbeatInterval?: ReturnType<typeof setInterval>;
 
   constructor(options: ClientOptions) {
     super();
     this.token = options.token;
     this.intents = options.intents;
   }
-  async heartbeat(interval: number) {
-    return setTimeout(() => {
-      this.ws.send(JSON.stringify({op: 1, d: null}))
-    }, interval)
+  heartbeat(interval: number) {
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+    this.acknowledgedHeartbeat = true;
+    this.heartbeatInterval = setInterval(() => {
+      if (!this.acknowledgedHeartbeat) {
+        console.warn('No heartbeat ack received, terminating connection.');
+        this.ws.terminate();
+        clearInterval(this.heartbeatInterval!);
+        return;
+      }
+      this.acknowledgedHeartbeat = false;
+      this.ws.send(JSON.stringify({ op: 1, d: this.lastsequence }));
+    }, interval);
   }
   async voiceStateUpdate(guildId: string, channelId: any, self_muted: boolean, self_deafen: boolean) {
     const response = await this.axiosInstance.get(`https://discord.com/api/v9/guilds/${guildId}`);
@@ -214,9 +224,6 @@ class Client extends EventEmitter {
     }
   }
   async login() {
-    // Important DATA
-    let retry_session;
-    let validationCode;
     try {
       const wsUrl = 'wss://gateway.discord.gg/?v=10&encoding=json';
       const axiosstance = axios.create({
@@ -227,12 +234,9 @@ class Client extends EventEmitter {
       });
       this.axiosInstance = axiosstance;
       axiosInstanceAll = axiosstance;
-      this.ws = new WebSocketLib(wsUrl);
-      let mhm = 0;
-      this.intents.forEach(num => {
-        mhm += num
-      });
-      const payload = {
+
+      const mhm = this.intents.reduce((sum, num) => sum + num, 0);
+      const identifyPayload = {
         op: 2,
         d: {
           token: `Bot ${this.token}`,
@@ -243,107 +247,60 @@ class Client extends EventEmitter {
             device: 'robo.js'
           }
         }
-      }
-      this.ws.once('open', () => {
-        console.log('Connected to Discord gateway');
-        this.ws.send(JSON.stringify(payload))
-      });
-  
-      this.ws.on('message', async (message) => {
-        const data = JSON.parse(message);
-        const { d, event, op, t, s } = data;
-        switch (op) {
-          case 10: // Hello
-            console.log(`Hello discord! Thanks, I now know that my heartbeat interval is ${data.d.heartbeat_interval}`)
-            this.acknowledgedHeartbeat = false
-            this.heartbeat(35000)
-            break;
-          case 0: // Dispatch
-          if (s === null) {
+      };
 
+      const connect = (url: string, resume = false) => {
+        this.ws = new WebSocketLib(url);
+        this.ws.once('open', () => {
+          let payload: any;
+          if (resume && this.sessionId) {
+            payload = { op: 6, d: { token: `Bot ${this.token}`, session_id: this.sessionId, seq: this.lastsequence } };
           } else {
-            this.lastsequence = s;
+            payload = identifyPayload;
           }
-            if (data.t === 'READY') {
-              const userData = data.d;
-              this.sessionId = data.d.session_id;
-              this.websocketUrlForReconnect = data.d.resume_gateway_url;
-              this.emit(DiscordEvents.Ready, userData.user);
-            }
-            if (data.t === 'MESSAGE_CREATE') {
-              const togivesob = {
+          console.log(resume && this.sessionId ? 'Resuming session' : 'Identifying to gateway');
+          this.ws.send(JSON.stringify(payload));
+        });
+
+        this.ws.on('message', async (message: string) => {
+          const data = JSON.parse(message);
+          const { d, op, t, s } = data;
+          if (s != null) this.lastsequence = s;
+
+          if (op === 10) {
+            this.acknowledgedHeartbeat = false;
+            this.heartbeat(data.d.heartbeat_interval);
+          } else if (op === 0) {
+            if (t === DiscordEvents.Ready) {
+              this.sessionId = d.session_id;
+              this.websocketUrlForReconnect = d.resume_gateway_url;
+              this.emit(DiscordEvents.Ready, d.user);
+            } else if (t === DiscordEvents.MessageCreate) {
+              const msg = new Message({
                 id: d.id,
                 content: d.content,
                 author: d.author,
-                channel: {
-                  id: d.channel_id,
-                  name: null,
-                  type: null
-                }
-              }
-              this.emit(DiscordEvents.MessageCreate, new Message(togivesob, this))
+                channel: { id: d.channel_id, name: null, type: null }
+              }, this);
+              this.emit(DiscordEvents.MessageCreate, msg);
             }
-            break;
-          case 1: // Heartbeat requested from discord
-            this.ws.send(JSON.stringify({op: 1, d: null}))
-            this.acknowledgedHeartbeat = false
-            break;
-          case 11:
-            this.acknowledgedHeartbeat = true
-            break;
-          case 7:
-            this.ws.terminate();
-        this.ws = new WebSocketLib(`${this.websocketUrlForReconnect}/?v=10&encoding=json`);
-        const payload = {
-          op: 6,
-          d: {
-            token: `Bot ${this.token}`,
-            session_id: this.sessionId,
-            seq: this.lastsequence
+          } else if (op === 1) {
+            this.ws.send(JSON.stringify({ op: 1, d: null }));
+            this.acknowledgedHeartbeat = false;
+          } else if (op === 11) {
+            this.acknowledgedHeartbeat = true;
           }
-        };
-        this.ws.send(JSON.stringify(payload));
-          break;
-        case 9:
-          if (d === false) {
-            throw new Error('Discord terminated the websocket connection and is not allowing reconnection. Please run your code again\nNOTE: This is normal, and is expected, sometimes, websocket connections falls. Or discord denies it');
-          } else {
-        this.ws.destroy();
-        this.ws = new WebSocketLib(`${this.websocketUrlForReconnect}/?v=10&encoding=json`);
-        const payload = {
-          op: 6,
-          d: {
-            token: `Bot ${this.token}`,
-            session_id: this.sessionId,
-            seq: this.lastsequence
-          }
-        };
-        this.ws.send(JSON.stringify(payload));
-          }
-          default:
-            console.log(`Received unknown opcode ${data.op}`);
-            break;
-        }
-      });
-  
-      this.ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
-      });
-  
-      this.ws.on('close', (code, reason) => {
-        console.log(`WebSocket connection closed with code ${code} and reason ${reason}. Reconnecting...`);
-        this.ws.terminate()
-        this.ws = new WebSocketLib(`${this.websocketUrlForReconnect}/?v=10&encoding=json`);
-        const payload = {
-          op: 6,
-          d: {
-            token: `Bot ${this.token}`,
-            session_id: this.sessionId,
-            seq: this.lastsequence
-          }
-        };
-        this.ws.send(JSON.stringify(payload));
-      });
+        });
+
+        this.ws.on('error', (error) => console.error('WebSocket error:', error));
+        this.ws.on('close', (code, reason) => {
+          console.warn(`WebSocket closed with code ${code}, reason: ${reason.toString()}`);
+          const url = this.sessionId ? this.websocketUrlForReconnect : wsUrl;
+          setTimeout(() => connect(url, Boolean(this.sessionId)), 5000);
+        });
+      };
+
+      connect(wsUrl);
     } catch (error) {
       console.error('Error connecting to WebSocket:', error);
     }
